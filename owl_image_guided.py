@@ -1,12 +1,12 @@
 import torch
 from transformers import OwlViTForObjectDetection
 from transformers.models.owlvit.modeling_owlvit import (
-    OwlViTImageGuidedObjectDetectionOutput,
     generalized_box_iou,
     box_iou,
     center_to_corners_format,
 )
-from torch.nn.functional import cosine_similarity, normalize
+from torchvision.ops import nms
+from torch.nn.functional import cosine_similarity
 
 
 class ImageGuidedOwlVit(OwlViTForObjectDetection):
@@ -14,25 +14,28 @@ class ImageGuidedOwlVit(OwlViTForObjectDetection):
         super().__init__(config)
 
     def _reshape_feature_map(self, feature_map):
-        batch_size, num_patches, num_patches, hidden_dim = feature_map.shape
         return torch.reshape(
-            feature_map, (batch_size, num_patches * num_patches, hidden_dim)
+            feature_map,
+            (
+                feature_map.shape[0],
+                feature_map.shape[1] * feature_map.shape[2],
+                feature_map.shape[3],
+            ),
         )
 
-    def get_query_box_features(
-        self, query_image_features, query_feature_map, query_box
-    ):
-        _, class_embeddings = self.class_predictor(query_image_features)
+    def get_query_box_features(self, query_image, query_box):
+        query_features, _ = self.image_embedder(pixel_values=query_image)
+        query_features_reshaped = self._reshape_feature_map(query_features)
+        _, class_embeddings = self.class_predictor(query_features_reshaped)
         pred_boxes = center_to_corners_format(
-            self.box_predictor(query_image_features, query_feature_map)
+            self.box_predictor(query_features_reshaped, query_features)
         )
 
         # TODO: Support more queries/batches
-        assert query_image_features.shape[0] == 1
         assert pred_boxes.shape[0] == 1
         assert class_embeddings.shape[0] == 1
 
-        query_image_features = query_image_features.squeeze(0)
+        query_image = query_image.squeeze(0)
         pred_boxes = pred_boxes.squeeze(0)
         class_embeddings = class_embeddings.squeeze(0)
         query_box = query_box.to(pred_boxes.device)
@@ -60,29 +63,12 @@ class ImageGuidedOwlVit(OwlViTForObjectDetection):
             selected_indices = torch.tensor([torch.argmax(ious)])
             best_box_index = torch.tensor([torch.argmax(ious)])
 
-        return class_embeddings[best_box_index]
+        return class_embeddings[best_box_index], pred_boxes[best_box_index]
 
-    def image_guided_detection(
-        self,
-        target_pixel_values,
-        query_feature_map,
-        query_box,
-    ):
+    def image_guided_detection(self, target_pixel_values, query_embeds):
         # Compute target image features
-        feature_map, vision_outputs = self.image_embedder(
-            pixel_values=target_pixel_values,
-            output_attentions=False,
-            output_hidden_states=False,
-        )
-
+        feature_map, _ = self.image_embedder(pixel_values=target_pixel_values)
         target_image_features = self._reshape_feature_map(feature_map)
-
-        # Compute query image features and determine the features of the
-        # selected area
-        query_image_feats = self._reshape_feature_map(query_feature_map)
-        query_embeds = self.get_query_box_features(
-            query_image_feats, query_feature_map, query_box
-        )
 
         # Predict object classes [batch_size, num_patches, num_queries+1]
         pred_logits, class_embeds = self.class_predictor(
@@ -91,10 +77,7 @@ class ImageGuidedOwlVit(OwlViTForObjectDetection):
 
         # Predict object boxes
         pred_boxes = self.box_predictor(target_image_features, feature_map)
-        sims = cosine_similarity(
-            normalize(query_embeds), normalize(class_embeds, dim=-1), dim=-1
-        )
-
+        sims = cosine_similarity(query_embeds, class_embeds, dim=-1)
         return pred_logits, pred_boxes, sims
 
 
@@ -106,7 +89,6 @@ def post_process_image_guided_detection(
     target_image_size=None,
     sims=None,
 ):
-    print(threshold)
     probs = torch.max(logits, dim=-1)
     scores = torch.sigmoid(probs.values)
     # If there are no scores confident enough, then pass
@@ -115,20 +97,20 @@ def post_process_image_guided_detection(
 
     # Convert to [x0, y0, x1, y1] format
     target_boxes = center_to_corners_format(target_boxes)
-
     # Apply non-maximum suppression (NMS)
-    if nms_threshold < 1.0:
-        for idx in range(target_boxes.shape[0]):
-            for i in torch.argsort(-scores[idx]):
-                if not scores[idx][i]:
-                    continue
+    for idx in range(target_boxes.shape[0]):
+        for i in torch.argsort(-scores[idx]):
+            if not scores[idx][i]:
+                continue
+            ious = box_iou(target_boxes[idx][i, :].unsqueeze(0), target_boxes[idx])[0][
+                0
+            ]
+            ious[i] = -1.0  # Mask self-IoU.
+            scores[idx][ious > nms_threshold] = 0.0
 
-                ious = box_iou(target_boxes[idx][i, :].unsqueeze(0), target_boxes[idx])[
-                    0
-                ][0]
-                ious[i] = -1.0  # Mask self-IoU.
-                scores[idx][ious > nms_threshold] = 0.0
-
+    torch_nms = nms(target_boxes.squeeze(0), scores.squeeze(0), iou_threshold=0.3)
+    print(torch_nms)
+    exit()
     # Convert from relative [0, 1] to absolute [0, height] coordinates
     img_h, img_w = target_image_size.unbind(1)
     scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1).to(target_boxes.device)
