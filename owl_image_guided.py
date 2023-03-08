@@ -90,23 +90,28 @@ def post_process_image_guided_detection(
     sims=None,
 ):
     probs = torch.max(logits, dim=-1)
-    scores = torch.sigmoid(probs.values)
+    scores = torch.sigmoid(probs.values).squeeze(0)
+    target_boxes = target_boxes.squeeze(0)
+    indices = nms(target_boxes, scores, iou_threshold=0.3)
+    print(scores[indices])
+    print(target_boxes[indices])
+    exit()
     # If there are no scores confident enough, then pass
-    if scores.max() < threshold:
-        return [{"scores": [], "sims": [], "boxes": []}]
+    # if scores.max() < threshold:
+    #     return [{"scores": [], "sims": [], "boxes": []}]
 
-    # Convert to [x0, y0, x1, y1] format
-    target_boxes = center_to_corners_format(target_boxes)
-    # Apply non-maximum suppression (NMS)
-    for idx in range(target_boxes.shape[0]):
-        for i in torch.argsort(-scores[idx]):
-            if not scores[idx][i]:
-                continue
-            ious = box_iou(target_boxes[idx][i, :].unsqueeze(0), target_boxes[idx])[0][
-                0
-            ]
-            ious[i] = -1.0  # Mask self-IoU.
-            scores[idx][ious > nms_threshold] = 0.0
+    # # Convert to [x0, y0, x1, y1] format
+    # target_boxes = center_to_corners_format(target_boxes)
+    # # Apply non-maximum suppression (NMS)
+    # for idx in range(target_boxes.shape[0]):
+    #     for i in torch.argsort(-scores[idx]):
+    #         if not scores[idx][i]:
+    #             continue
+    #         ious = box_iou(target_boxes[idx][i, :].unsqueeze(0), target_boxes[idx])[0][
+    #             0
+    #         ]
+    #         ious[i] = -1.0  # Mask self-IoU.
+    #         scores[idx][ious > nms_threshold] = 0.0
 
     torch_nms = nms(target_boxes.squeeze(0), scores.squeeze(0), iou_threshold=0.3)
     print(torch_nms)
