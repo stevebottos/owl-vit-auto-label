@@ -1,0 +1,4 @@
+.archive/
+datasets/
+detections/
+**/*__pycache__/
