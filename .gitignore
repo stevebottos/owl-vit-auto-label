@@ -2,3 +2,4 @@
 datasets/
 detections/
 **/*__pycache__/
+debug/
