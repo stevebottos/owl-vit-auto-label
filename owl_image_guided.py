@@ -108,34 +108,81 @@ class ImageGuidedOwlVit(OwlViTForObjectDetection):
         return pred_logits, pred_boxes, class_embeds
 
 
-def post_process_image_guided_detection(
+def post_process(
     logits,
     target_boxes,
     embeddings,
     threshold=0.7,
     iou_threshold=0.3,
     target_image_size=None,
-    sims=None,
 ):
     probs = torch.max(logits, dim=-1)
-    scores = torch.sigmoid(probs.values).squeeze(0)
-    embeddings = embeddings.squeeze(0)
+    scores = torch.sigmoid(probs.values)
+
+    if scores.max() < threshold:
+        return [{"scores": [], "embeddings": [], "boxes": []}]
+
+    # Convert to [x0, y0, x1, y1] format
+    target_boxes = center_to_corners_format(target_boxes)
+    # Apply non-maximum suppression (NMS)
+    for idx in range(target_boxes.shape[0]):
+        for i in torch.argsort(-scores[idx]):
+            if not scores[idx][i]:
+                continue
+            ious = box_iou(target_boxes[idx][i, :].unsqueeze(0), target_boxes[idx])[0][
+                0
+            ]
+            ious[i] = -1.0  # Mask self-IoU.
+            scores[idx][ious > iou_threshold] = 0.0
 
     # Convert from relative [0, 1] to absolute [0, height] coordinates
     img_h, img_w = target_image_size.unbind(1)
     scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1).to(target_boxes.device)
     target_boxes = target_boxes * scale_fct[:, None, :]
 
-    target_boxes = target_boxes.squeeze(0)
-    target_boxes = center_to_corners_format(target_boxes)
+    # Compute box display alphas based on prediction scores
+    results = []
+    for idx in range(target_boxes.shape[0]):
+        # Select scores for boxes matching the current query:
+        _scores = scores[idx]
+        _boxes = target_boxes[idx]
 
-    indices = nms(target_boxes, scores, iou_threshold=iou_threshold)
-    scores = scores[indices]
-    target_boxes = target_boxes[indices]
-    embeddings = embeddings[indices]
+        _boxes = _boxes[torch.where(_scores > threshold)]
+        _scores = _scores[torch.where(_scores > threshold)]
+        embeddings = embeddings[torch.where(scores > threshold)].cpu().numpy()
+        results.append({"scores": _scores, "boxes": _boxes, "embeddings": embeddings})
 
-    return (
-        scores[torch.where(scores > threshold)],
-        target_boxes[torch.where(scores > threshold)],
-        embeddings[torch.where(scores > threshold)].cpu().numpy(),
-    )
+    return results
+
+
+# TODO: IDK why but this nms is way worse
+# def post_process_image_guided_detection_torch(
+#     logits,
+#     target_boxes,
+#     embeddings,
+#     threshold=0.7,
+#     iou_threshold=0.3,
+#     target_image_size=None,
+# ):
+#     probs = torch.max(logits, dim=-1)
+#     scores = torch.sigmoid(probs.values).squeeze(0)
+#     embeddings = embeddings.squeeze(0)
+
+#     # Convert from relative [0, 1] to absolute [0, height] coordinates
+#     img_h, img_w = target_image_size.unbind(1)
+#     scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1).to(target_boxes.device)
+#     target_boxes = target_boxes * scale_fct[:, None, :]
+
+#     target_boxes = target_boxes.squeeze(0)
+#     target_boxes = center_to_corners_format(target_boxes)
+
+#     indices = nms(target_boxes, scores, iou_threshold=iou_threshold)
+#     scores = scores[indices]
+#     target_boxes = target_boxes[indices]
+#     embeddings = embeddings[indices]
+
+#     return (
+#         scores[torch.where(scores > threshold)],
+#         target_boxes[torch.where(scores > threshold)],
+#         embeddings[torch.where(scores > threshold)].cpu().numpy(),
+#     )

@@ -46,7 +46,7 @@ def start_app(query_impath, target_images_dir):
     )
     def displayClick(btn1):
         if "btn-nclicks-1" == ctx.triggered_id:
-            print("Running inference (check terminal)")
+            print("Running inference")
             target_images = glob.glob(f"{target_images_dir}/*")
             main(query_impath, app.query_box, target_images)
         return

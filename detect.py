@@ -5,7 +5,7 @@ import numpy as np
 from transformers import OwlViTProcessor
 from owl_image_guided import (
     ImageGuidedOwlVit,
-    post_process_image_guided_detection,
+    post_process,
 )
 import os
 
@@ -37,6 +37,7 @@ def draw_box_on_image(image, box, color=(0, 255, 0)):
 def main(
     query_image_fpath, query_box, target_images, thresh=0.95, out_dir="detections"
 ):
+    use_classifier = False
     device = "cuda" if torch.cuda.is_available() else "cpu"
     query_box, query_image, query_image_cv2 = format_query(query_image_fpath, query_box)
 
@@ -64,15 +65,17 @@ def main(
                 target_image, query_embeds
             )
 
-            scores, boxes, embeddings = post_process_image_guided_detection(
+            results = post_process(
                 logits,
                 boxes,
                 embeddings,
                 threshold=0.9,
                 target_image_size=torch.Tensor([main_image.size[::-1]]),
-            )
+            ).pop()
+            scores = results["scores"]
+            boxes = results["boxes"]
+            embeddings = results["embeddings"]
 
-            use_classifier = True
             if use_classifier and len(boxes):
                 scores = torch.tensor(clf.predict_proba(embeddings)[:, 1])
                 boxes = boxes[torch.where(scores > 0.5)]
