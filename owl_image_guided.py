@@ -26,7 +26,37 @@ class ImageGuidedOwlVit(OwlViTForObjectDetection):
             ),
         )
 
-    def get_query_box_features(self, query_image, query_box):
+    #
+    # EXPERIMENTAL! Use predictions that we know are wrong to help during post processing
+    #
+    def train_classifier(
+        self, query_features_reshaped, query_embedding, best_box_index, class_embeddings
+    ):
+        query_logits, _class_embeddings = self.class_predictor(
+            image_feats=query_features_reshaped, query_embeds=query_embedding
+        )
+        _class_embeddings = _class_embeddings.squeeze(0).cpu().numpy()
+
+        probs = torch.max(query_logits, dim=-1)
+        scores = torch.sigmoid(probs.values).squeeze(0).cpu().numpy()
+        labels = np.zeros(len(_class_embeddings))
+        labels[best_box_index.item()] = 1
+        thresh = 0.8  # Keep only very high scoring negative labels else the model just learns the negative label
+        _class_embeddings = _class_embeddings[scores > thresh]
+        labels = labels[scores > thresh]
+
+        assert len(_class_embeddings) > 5
+
+        _query_embedding = class_embeddings[best_box_index].cpu().numpy()
+
+        _class_embeddings = np.vstack([_class_embeddings, _query_embedding])
+        labels = np.append(labels, 1)
+        clf = MLPClassifier(random_state=1, max_iter=500, verbose=True)
+        clf.fit(_class_embeddings, labels)
+
+        return clf
+
+    def get_query_box_features(self, query_image, query_box, train_classifier):
         query_features, _ = self.image_embedder(pixel_values=query_image)
         query_features_reshaped = self._reshape_feature_map(query_features)
         _, class_embeddings = self.class_predictor(image_feats=query_features_reshaped)
@@ -42,7 +72,19 @@ class ImageGuidedOwlVit(OwlViTForObjectDetection):
         class_embeddings = class_embeddings.squeeze(0)
         query_box = query_box.to(pred_boxes.device)
 
-        ious, _ = box_iou(query_box, pred_boxes)
+        query_aspect_ratio = (query_box[:, 2] - query_box[:, 0]) / (
+            query_box[:, 3] - query_box[:, 1]
+        )
+        pred_aspect_ratios = (pred_boxes[:, 2] - pred_boxes[:, 0]) / (
+            pred_boxes[:, 3] - pred_boxes[:, 1]
+        )
+
+        mask = torch.isclose(pred_aspect_ratios, query_aspect_ratio, atol=1)
+
+        # pred_boxes = pred_boxes[mask]
+        # class_embeddings = class_embeddings[mask]
+
+        ious = box_iou(query_box, pred_boxes)[0] * mask
         # If there are no overlapping boxes, fall back to generalized IoU
         if torch.all(ious[0] == 0.0):
             print("Using generalized iou.")
@@ -59,34 +101,18 @@ class ImageGuidedOwlVit(OwlViTForObjectDetection):
         mean_embedding = torch.mean(selected_embeddings, axis=0)
         mean_sim = torch.einsum("d,id->i", mean_embedding, selected_embeddings)
         best_box_index = selected_indices[torch.argmin(mean_sim)]
+
         query_embedding = class_embeddings[best_box_index]
+        query_box = pred_boxes[best_box_index]
 
-        #
-        # EXPERIMENTAL! Use predictions that we know are wrong to help during post processing
-        #
-        query_logits, _class_embeddings = self.class_predictor(
-            image_feats=query_features_reshaped,
-            query_embeds=class_embeddings[best_box_index],
-        )
-        _class_embeddings = _class_embeddings.squeeze(0).cpu().numpy()
-        probs = torch.max(query_logits, dim=-1)
-        scores = torch.sigmoid(probs.values).squeeze(0).cpu().numpy()
-
-        labels = np.zeros(len(class_embeddings))
-        labels[best_box_index.item()] = 1
-        thresh = 0.8
-        _class_embeddings = _class_embeddings[scores > thresh]
-        labels = labels[scores > thresh]
-
-        _query_embedding = class_embeddings[best_box_index].cpu().numpy()
-
-        _class_embeddings = np.vstack([_class_embeddings, _query_embedding])
-        labels = np.append(labels, 1)
-        clf = MLPClassifier(random_state=1, max_iter=500, verbose=False)
-        clf.fit(_class_embeddings, labels)
-
-        probs = clf.predict_proba(_class_embeddings)
-
+        clf = None
+        if train_classifier:
+            clf = self.train_classifier(
+                query_features_reshaped,
+                query_embedding,
+                best_box_index,
+                class_embeddings,
+            )
         return (
             query_embedding,
             pred_boxes[best_box_index],

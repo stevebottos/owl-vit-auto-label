@@ -55,6 +55,6 @@ def start_app(query_impath, target_images_dir):
 
 
 if __name__ == "__main__":
-    query_impath = "datasets/marinesitu/01GGZ1P9T79KSG4V14HSFY5JTD.jpeg"
-    target_images_dir = "datasets/marinesitu"
+    query_impath = "datasets/turosi/01GP25YV5DEHWSW0AJX6WTNRCR.jpeg"
+    target_images_dir = "datasets/turosi"
     start_app(query_impath=query_impath, target_images_dir=target_images_dir)
