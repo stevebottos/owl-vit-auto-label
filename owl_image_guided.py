@@ -55,7 +55,6 @@ class ImageGuidedOwlVit(OwlViTForObjectDetection):
             # feature for each object is "good" and the rest are "background." To find
             # the one "good" feature we use the heuristic that it should be dissimilar
             # to the mean embedding.
-            print("CS", selected_embeddings.shape)
             mean_embedding = torch.mean(selected_embeddings, axis=0)
             mean_sim = torch.einsum("d,id->i", mean_embedding, selected_embeddings)
             best_box_index = selected_indices[torch.argmin(mean_sim)]
@@ -85,122 +84,75 @@ def post_process_image_guided_detection(
     logits,
     target_boxes,
     threshold=0.7,
-    nms_threshold=0.3,
+    iou_threshold=0.3,
     target_image_size=None,
     sims=None,
 ):
     probs = torch.max(logits, dim=-1)
     scores = torch.sigmoid(probs.values).squeeze(0)
-    target_boxes = target_boxes.squeeze(0)
-    indices = nms(target_boxes, scores, iou_threshold=0.3)
-    print(scores[indices])
-    print(target_boxes[indices])
-    exit()
-    # If there are no scores confident enough, then pass
-    # if scores.max() < threshold:
-    #     return [{"scores": [], "sims": [], "boxes": []}]
 
-    # # Convert to [x0, y0, x1, y1] format
-    # target_boxes = center_to_corners_format(target_boxes)
-    # # Apply non-maximum suppression (NMS)
-    # for idx in range(target_boxes.shape[0]):
-    #     for i in torch.argsort(-scores[idx]):
-    #         if not scores[idx][i]:
-    #             continue
-    #         ious = box_iou(target_boxes[idx][i, :].unsqueeze(0), target_boxes[idx])[0][
-    #             0
-    #         ]
-    #         ious[i] = -1.0  # Mask self-IoU.
-    #         scores[idx][ious > nms_threshold] = 0.0
-
-    torch_nms = nms(target_boxes.squeeze(0), scores.squeeze(0), iou_threshold=0.3)
-    print(torch_nms)
-    exit()
     # Convert from relative [0, 1] to absolute [0, height] coordinates
     img_h, img_w = target_image_size.unbind(1)
     scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1).to(target_boxes.device)
     target_boxes = target_boxes * scale_fct[:, None, :]
 
-    # Compute box display alphas based on prediction scores
-    results = []
-    for idx in range(target_boxes.shape[0]):
-        # Select scores for boxes matching the current query:
-        _scores = scores[idx]
-        _boxes = target_boxes[idx]
-        _sims = sims[idx]
-        _boxes = _boxes[torch.where(_scores > threshold)]
-        _sims = _sims[torch.where(_scores > threshold)]
-        _scores = _scores[torch.where(_scores > threshold)]
-        results.append(
-            {
-                "scores": _scores.tolist(),
-                "sims": _sims.tolist(),
-                "boxes": _boxes.tolist(),
-            }
-        )
+    target_boxes = target_boxes.squeeze(0)
+    target_boxes = center_to_corners_format(target_boxes)
+    sims = sims.squeeze(0)
 
-    return results
+    indices = nms(target_boxes, scores, iou_threshold=iou_threshold)
+    scores = scores[indices]
+    target_boxes = target_boxes[indices]
+    sims = sims[indices]
 
+    return {
+        "scores": scores[torch.where(scores > threshold)].tolist(),
+        "boxes": target_boxes[torch.where(scores > threshold)].tolist(),
+        "sims": sims[torch.where(scores > threshold)].tolist(),
+    }
+    # _scores = _scores[torch.where(_scores > threshold)]
+    # _boxes = _boxes[torch.where(_scores > threshold)]
+    # _sims = _sims[torch.where(_scores > threshold)]
 
-# def og_post_process_image_guided_detection(
-#     logits, target_boxes, threshold=0.7, nms_threshold=0.3, target_sizes=None
-# ):
-#     if len(logits) != len(target_sizes):
-#         raise ValueError(
-#             "Make sure that you pass in as many target sizes as the batch dimension of the logits"
-#         )
-#     if target_sizes.shape[1] != 2:
-#         raise ValueError(
-#             "Each element of target_sizes must contain the size (h, w) of each image of the batch"
-#         )
+    # # If there are no scores confident enough, then pass
+    # # if scores.max() < threshold:
+    # #     return [{"scores": [], "sims": [], "boxes": []}]
 
-#     probs = torch.max(logits, dim=-1)
-#     scores = torch.sigmoid(probs.values)
+    # # # Convert to [x0, y0, x1, y1] format
+    # # target_boxes = center_to_corners_format(target_boxes)
+    # # # Apply non-maximum suppression (NMS)
+    # # for idx in range(target_boxes.shape[0]):
+    # #     for i in torch.argsort(-scores[idx]):
+    # #         if not scores[idx][i]:
+    # #             continue
+    # #         ious = box_iou(target_boxes[idx][i, :].unsqueeze(0), target_boxes[idx])[0][
+    # #             0
+    # #         ]
+    # #         ious[i] = -1.0  # Mask self-IoU.
+    # #         scores[idx][ious > nms_threshold] = 0.0
 
-#     # Convert to [x0, y0, x1, y1] format
-#     target_boxes = center_to_corners_format(target_boxes)
+    # exit()
+    # Convert from relative [0, 1] to absolute [0, height] coordinates
+    img_h, img_w = target_image_size.unbind(1)
+    scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1).to(target_boxes.device)
+    target_boxes = target_boxes * scale_fct[:, None, :]
 
-#     # Apply non-maximum suppression (NMS)
-#     if nms_threshold < 1.0:
-#         for idx in range(target_boxes.shape[0]):
-#             for i in torch.argsort(-scores[idx]):
-#                 if not scores[idx][i]:
-#                     continue
+    # # Compute box display alphas based on prediction scores
+    # results = []
+    # for idx in range(target_boxes.shape[0]):
+    #     # Select scores for boxes matching the current query:
+    #     _scores = scores[idx]
+    #     _boxes = target_boxes[idx]
+    #     _sims = sims[idx]
+    #     _boxes = _boxes[torch.where(_scores > threshold)]
+    #     _sims = _sims[torch.where(_scores > threshold)]
+    #     _scores = _scores[torch.where(_scores > threshold)]
+    #     results.append(
+    #         {
+    #             "scores": _scores.tolist(),
+    #             "sims": _sims.tolist(),
+    #             "boxes": _boxes.tolist(),
+    #         }
+    #     )
 
-#                 ious = box_iou(target_boxes[idx][i, :].unsqueeze(0), target_boxes[idx])[
-#                     0
-#                 ][0]
-#                 ious[i] = -1.0  # Mask self-IoU.
-#                 scores[idx][ious > nms_threshold] = 0.0
-
-#     # Convert from relative [0, 1] to absolute [0, height] coordinates
-#     img_h, img_w = target_sizes.unbind(1)
-#     scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1).to(target_boxes.device)
-#     target_boxes = target_boxes * scale_fct[:, None, :]
-
-#     # Compute box display alphas based on prediction scores
-#     results = []
-#     alphas = torch.zeros_like(scores)
-
-#     for idx in range(target_boxes.shape[0]):
-#         # Select scores for boxes matching the current query:
-#         query_scores = scores[idx]
-#         if not query_scores.nonzero().numel():
-#             continue
-
-#         # Scale box alpha such that the best box for each query has alpha 1.0 and the worst box has alpha 0.1.
-#         # All other boxes will either belong to a different query, or will not be shown.
-#         max_score = torch.max(query_scores) + 1e-6
-#         query_alphas = (query_scores - (max_score * 0.1)) / (max_score * 0.9)
-#         query_alphas[query_alphas < threshold] = 0.0
-#         query_alphas = torch.clip(query_alphas, 0.0, 1.0)
-#         alphas[idx] = query_alphas
-
-#         mask = alphas[idx] > 0
-#         box_scores = alphas[idx][mask]
-#         boxes = target_boxes[idx][mask]
-#         results.append(
-#             {"scores": box_scores.tolist(), "labels": None, "boxes": boxes.tolist()}
-#         )
-
-#     return results
+    # return results

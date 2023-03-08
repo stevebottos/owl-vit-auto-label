@@ -92,20 +92,22 @@ def main(
                 pred_logits,
                 pred_boxes,
                 threshold=0.9,
-                nms_threshold=0.3,
                 target_image_size=torch.Tensor([main_image.size[::-1]]),
                 sims=sim,
-            ).pop()
-
+            )
+            simscores = np.array(results["scores"]) * np.array(results["sims"])
             print(
-                f"boxes: {len(results['boxes'])}\nscores: {[round(s, 2) for s in results['scores']]}\nsims: {[round(s, 2) for s in results['sims']]}"
+                target_image_path,
+                f"boxes: {len(results['boxes'])}\n"
+                f"scores: {[round(s, 2) for s in results['scores']]}\n"
+                f"scores x sims: {[round(s, 2) for s in simscores]}",
             )
 
             if not len(results["boxes"]):
                 continue
-            simscores = np.array(results["scores"]) * np.array(results["sims"])
+
             for simscore, box in zip(simscores, results["boxes"]):
-                # if simscore < 0.8:
+                # if simscore < 0.75:
                 #     continue
                 draw_box_on_image(main_image_cv2, box)
 
