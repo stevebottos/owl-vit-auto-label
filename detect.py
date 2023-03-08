@@ -44,27 +44,34 @@ def main(
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     query_box, query_unmasked, query_masked = format(query_image_fpath, query_box)
-    query_unmasked.save("t.jpg")
+    query_image = query_unmasked
+
     processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
     model = ImageGuidedOwlVit.from_pretrained("google/owlvit-base-patch32").to(device)
     model.eval()
     with torch.no_grad():
-        for target_image in target_images:
-            main_image = Image.open(target_image)
-            main_image_cv2 = cv2.imread(target_image)
+        query_image = processor(query_images=query_image, return_tensors="pt")[
+            "query_pixel_values"
+        ].to(device)
+        query_features, _ = model.image_embedder(pixel_values=query_image)
+
+        for target_image_path in target_images:
+            main_image = Image.open(target_image_path)
+            main_image_cv2 = cv2.imread(target_image_path)
             # Only support single batchsize for now
-            inputs = processor(
-                query_images=query_masked, images=main_image, return_tensors="pt"
-            ).to(device)
+            target_image = processor(images=main_image, return_tensors="pt")[
+                "pixel_values"
+            ].to(device)
 
             import time
 
             _t = time.time()
             pred_logits, pred_boxes, sim = model.image_guided_detection(
-                target_pixel_values=inputs["pixel_values"],
-                query_pixel_values=inputs["query_pixel_values"],
+                target_pixel_values=target_image,
+                query_feature_map=query_features,
                 query_box=query_box,
             )
+            print(time.time() - _t)
             results = post_process_image_guided_detection(
                 pred_logits,
                 pred_boxes,
@@ -89,7 +96,9 @@ def main(
                     (0, 255, 0),
                     10,
                 )
-            cv2.imwrite(f"{out_dir}/{os.path.basename(target_image)}", main_image_cv2)
+            cv2.imwrite(
+                f"{out_dir}/{os.path.basename(target_image_path)}", main_image_cv2
+            )
 
 
 if __name__ == "__main__":

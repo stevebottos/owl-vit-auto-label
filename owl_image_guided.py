@@ -63,7 +63,10 @@ class ImageGuidedOwlVit(OwlViTForObjectDetection):
         return class_embeddings[best_box_index]
 
     def image_guided_detection(
-        self, target_pixel_values, query_pixel_values, query_box
+        self,
+        target_pixel_values,
+        query_feature_map,
+        query_box,
     ):
         # Compute target image features
         feature_map, vision_outputs = self.image_embedder(
@@ -71,11 +74,11 @@ class ImageGuidedOwlVit(OwlViTForObjectDetection):
             output_attentions=False,
             output_hidden_states=False,
         )
+
         target_image_features = self._reshape_feature_map(feature_map)
 
         # Compute query image features and determine the features of the
         # selected area
-        query_feature_map, _ = self.image_embedder(pixel_values=query_pixel_values)
         query_image_feats = self._reshape_feature_map(query_feature_map)
         query_embeds = self.get_query_box_features(
             query_image_feats, query_feature_map, query_box
