@@ -10,7 +10,7 @@ from owl_image_guided import (
 import os
 
 
-def format(query_image_fpath, box):
+def format_query(query_image_fpath, box):
     image = cv2.imread(query_image_fpath)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     stencil = np.zeros(image.shape).astype(image.dtype)
@@ -19,30 +19,16 @@ def format(query_image_fpath, box):
     x2 = box[2] / image.shape[1]
     y2 = box[3] / image.shape[0]
 
-    # cont = np.array(
-    #     [
-    #         [x1 - 0.05, y1 - 0.05],
-    #         [x2 + 0.05, y1 - 0.05],
-    #         [x2 + 0.05, y2 + 0.05],
-    #         [x1 - 0.05, y2 + 0.05],
-    #     ]
-    # )
-    # cont = (cont * image.shape[:-1][::-1]).astype(np.int32)
-    # color = [255, 255, 255]
-    # cv2.fillPoly(stencil, [cont], color)
-    # masked = cv2.bitwise_and(image, stencil)
-
     image_pil = Image.fromarray(image)
-    # image_masked = Image.fromarray(masked)
     return torch.tensor([x1, y1, x2, y2]).unsqueeze(0), image_pil, image
 
 
-def draw_box_on_image(image, box):
+def draw_box_on_image(image, box, color=(0, 255, 0)):
     image = cv2.rectangle(
         image,
         [int(box[0]), int(box[1])],
         [int(box[2]), int(box[3])],
-        (0, 255, 0),
+        color,
         10,
     )
     return image
@@ -52,31 +38,20 @@ def main(
     query_image_fpath, query_box, target_images, thresh=0.95, out_dir="detections"
 ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    query_box, query_image, query_image_cv2 = format(query_image_fpath, query_box)
+    query_box, query_image, query_image_cv2 = format_query(query_image_fpath, query_box)
 
     processor = OwlViTProcessor.from_pretrained("google/owlvit-base-patch32")
     model = ImageGuidedOwlVit.from_pretrained("google/owlvit-base-patch32").to(device)
     model.eval()
     with torch.no_grad():
-        query_image = processor(query_images=query_image, return_tensors="pt")[
-            "query_pixel_values"
-        ].to(device)
+        query_image_processed = processor(
+            query_images=query_image, return_tensors="pt"
+        )["query_pixel_values"].to(device)
 
-        query_embeds, best_query_box = model.get_query_box_features(
-            query_image, query_box
+        query_embeds, best_query_box, clf = model.get_query_box_features(
+            query_image_processed, query_box
         )
-        # To verify that the chosen box is legit
-        # best_query_box = best_query_box.detach().cpu().numpy()[0]
-        # print(best_query_box)
-        # query_box = best_query_box * [
-        #     *query_image_cv2.shape[:-1][::-1],
-        #     *query_image_cv2.shape[:-1][::-1],
-        # ]
-        # print(query_box)
-        # test_image = draw_box_on_image(query_image_cv2, query_box)
-        # cv2.imwrite("test_image.jpg", test_image)
-        # print(query_box)
-        # exit()
+
         for target_image_path in target_images:
             main_image = Image.open(target_image_path)
             main_image_cv2 = cv2.imread(target_image_path)
@@ -84,32 +59,36 @@ def main(
             target_image = processor(images=main_image, return_tensors="pt")[
                 "pixel_values"
             ].to(device)
-            pred_logits, pred_boxes, sim = model.image_guided_detection(
-                target_pixel_values=target_image, query_embeds=query_embeds
+
+            logits, boxes, embeddings = model.image_guided_detection(
+                target_image, query_embeds
             )
 
-            results = post_process_image_guided_detection(
-                pred_logits,
-                pred_boxes,
+            scores, boxes, embeddings = post_process_image_guided_detection(
+                logits,
+                boxes,
+                embeddings,
                 threshold=0.9,
                 target_image_size=torch.Tensor([main_image.size[::-1]]),
-                sims=sim,
-            )
-            simscores = np.array(results["scores"]) * np.array(results["sims"])
-            print(
-                target_image_path,
-                f"boxes: {len(results['boxes'])}\n"
-                f"scores: {[round(s, 2) for s in results['scores']]}\n"
-                f"scores x sims: {[round(s, 2) for s in simscores]}",
             )
 
-            if not len(results["boxes"]):
+            use_classifier = True
+            if use_classifier and len(boxes):
+                scores = torch.tensor(clf.predict_proba(embeddings)[:, 1])
+                boxes = boxes[torch.where(scores > 0.5)]
+                scores = scores[torch.where(scores > 0.5)]
+
+            if not len(boxes):
                 continue
 
-            for simscore, box in zip(simscores, results["boxes"]):
-                # if simscore < 0.75:
-                #     continue
-                draw_box_on_image(main_image_cv2, box)
+            print(
+                os.path.join("detections", os.path.basename(target_image_path)),
+                f"boxes: {len(boxes)}\n"
+                f"scores: {[round(s, 2) for s in scores.tolist()]}",
+            )
+
+            for box in boxes:
+                main_image = draw_box_on_image(main_image_cv2, box)
 
             cv2.imwrite(
                 f"{out_dir}/{os.path.basename(target_image_path)}", main_image_cv2
